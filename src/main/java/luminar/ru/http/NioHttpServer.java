@@ -38,7 +38,7 @@ public class NioHttpServer {
     private final LsmStorage storage;
 
     public NioHttpServer() {
-        this.storage = new LsmStorage(Path.of("data"), 1000);
+        this.storage = new LsmStorage(Path.of("data"), 10000);
     }
 
     /**
