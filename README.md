@@ -65,7 +65,7 @@ LsmStorage
 | POST   | `/set`                 | Записать значение     |
 | DELETE | `/delete?key={key}`    | Удалить ключ          |
 
-**POST /set** — тело запроса: `key=mykey&value=myvalue` (application/x-www-form-urlencoded)
+**POST /set** — тело запроса: `key=mykey&value=myvalue` (application/raw/text)
 
 ### Примеры
 
