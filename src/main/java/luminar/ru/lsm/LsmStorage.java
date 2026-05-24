@@ -88,16 +88,16 @@ public class LsmStorage {
 
             Path walPath = storageDir.resolve("wal.log");
             if (Files.exists(walPath) && Files.size(walPath) > 0) {
-                log.info("Найден файл WAL. Запуск процесса восстановления...");
+                log.info("WAL file found. Starting recovery process...");
                 try (WalReader reader = new WalReader(walPath)) {
                     ConcurrentSkipListMap<String, String> recovered = reader.recover();
                     if (!recovered.isEmpty()) {
                         memTable.get().putAll(recovered);
                         memTableSize.set(recovered.size());
-                        log.info("Успешно восстановлено " + recovered.size() + " записей из WAL.");
+                        log.info("Successfully recovered " + recovered.size() + " records from WAL.");
                     }
                 } catch (Exception e) {
-                    log.log(Level.WARNING, "Ошибка при восстановлении из WAL", e);
+                    log.log(Level.WARNING, "Error during WAL recovery", e);
                 }
             }
 
@@ -115,16 +115,16 @@ public class LsmStorage {
             for (Path path : dbFiles) {
                 try {
                     loaded.add(SstFile.open(path));
-                    log.fine("Загружен SSTable: " + path.getFileName());
+                    log.fine("Loaded SSTable: " + path.getFileName());
                 } catch (Exception e) {
-                    log.log(Level.WARNING, "Ошибка загрузки файла " + path, e);
+                    log.log(Level.WARNING, "Error loading file " + path, e);
                 }
             }
             sstFiles.set(loaded);
-            log.info("Хранилище инициализировано. Загружено SSTables: " + loaded.size());
+            log.info("Storage initialized. Loaded SSTables: " + loaded.size());
 
         } catch (IOException e) {
-            throw new RuntimeException("Критическая ошибка инициализации хранилища", e);
+            throw new RuntimeException("Critical storage initialization error", e);
         }
     }
 
@@ -133,10 +133,10 @@ public class LsmStorage {
      * Сначала сохраняет в WAL для надежности, затем в MemTable.
      */
     public void put(String key, String value) {
-        if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
-        Objects.requireNonNull(key, "Ключ не может быть null");
-        Objects.requireNonNull(value, "Значение не может быть null");
-        if (TOMBSTONE.equals(value)) throw new IllegalArgumentException("Значение совпадает с внутренним маркером удаления");
+        if (isClosed.get()) throw new IllegalStateException("Storage is closed");
+        Objects.requireNonNull(key, "Key cannot be null");
+        Objects.requireNonNull(value, "Value cannot be null");
+        if (TOMBSTONE.equals(value)) throw new IllegalArgumentException("Value matches internal tombstone marker");
 
         writeToWalAndMemTable(key, value);
     }
@@ -148,8 +148,8 @@ public class LsmStorage {
      * Вызов delete на несуществующем ключе безопасен и не является ошибкой.
      */
     public void delete(String key) {
-        if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
-        Objects.requireNonNull(key, "Ключ не может быть null");
+        if (isClosed.get()) throw new IllegalStateException("Storage is closed");
+        Objects.requireNonNull(key, "Key cannot be null");
 
         writeToWalAndMemTable(key, TOMBSTONE);
     }
@@ -158,7 +158,7 @@ public class LsmStorage {
         try {
             walWriter.append(key, value);
         } catch (IOException e) {
-            throw new RuntimeException("Ошибка записи в WAL", e);
+            throw new RuntimeException("Error writing to WAL", e);
         }
 
         memTable.get().put(key, value);
@@ -180,7 +180,7 @@ public class LsmStorage {
      * Если найден tombstone — возвращает null (ключ удалён).
      */
     public String get(String key) {
-        if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
+        if (isClosed.get()) throw new IllegalStateException("Storage is closed");
         Objects.requireNonNull(key);
 
         String val = memTable.get().get(key);
@@ -197,7 +197,7 @@ public class LsmStorage {
                 val = sst.get(key);
                 if (val != null) return isTombstone(val) ? null : val;
             } catch (IOException e) {
-                log.log(Level.WARNING, "Ошибка чтения из SSTable " + sst.getPath(), e);
+                log.log(Level.WARNING, "Error reading from SSTable " + sst.getPath(), e);
             }
         }
         return null;
@@ -243,13 +243,13 @@ public class LsmStorage {
             for (SstFile sst : sstFiles.get()) {
                 try { sst.close(); } catch (IOException ignored) {}
             }
-            log.info("LsmStorage успешно остановлен.");
+            log.info("LsmStorage successfully stopped.");
         } catch (InterruptedException e) {
             flushExecutor.shutdownNow();
             compactExecutor.shutdownNow();
             Thread.currentThread().interrupt();
         } catch (Exception e) {
-            log.log(Level.SEVERE, "Ошибка при закрытии хранилища", e);
+            log.log(Level.SEVERE, "Error closing storage", e);
         } finally {
             closeLock.writeLock().unlock();
         }
@@ -265,7 +265,7 @@ public class LsmStorage {
             try {
                 flushToFile(oldTable);
             } catch (Exception e) {
-                log.log(Level.SEVERE, "Сбой при сбросе MemTable (Flush)", e);
+                log.log(Level.SEVERE, "MemTable flush failure", e);
             } finally {
                 immutableMemTable.set(null);
                 flushing.set(false);
@@ -286,7 +286,7 @@ public class LsmStorage {
         long cnt = fileCounter.incrementAndGet();
         Path path = storageDir.resolve("sstable_" + timestamp + "_" + cnt + ".db");
 
-        log.info("Сброс на диск: " + table.size() + " ключей в " + path.getFileName());
+        log.info("Flushing to disk: " + table.size() + " keys to " + path.getFileName());
 
         SstWriter.write(path, table);
         SstFile newSst = SstFile.open(path);
@@ -311,7 +311,7 @@ public class LsmStorage {
         long cnt = fileCounter.incrementAndGet();
         Path path = storageDir.resolve("sstable_" + timestamp + "_" + cnt + ".db");
 
-        log.info("Синхронный сброс на диск: " + table.size() + " ключей в " + path.getFileName());
+        log.info("Synchronous flush to disk: " + table.size() + " keys to " + path.getFileName());
 
         SstWriter.write(path, table);
         SstFile newSst = SstFile.open(path);
@@ -341,33 +341,33 @@ public class LsmStorage {
             if (isClosed.get()) return;
 
             try {
-                log.info("Запуск фонового сжатия (Compaction) для " + paths.size() + " файлов...");
+                log.info("Starting background compaction for " + paths.size() + " files...");
                 List<SstFile> filesToCompact = new ArrayList<>();
                 for (Path p : paths) {
                     if (Files.exists(p)) {
                         filesToCompact.add(SstFile.open(p));
                     } else {
-                        log.warning("Файл не найден, пропуск: " + p.getFileName());
+                        log.warning("File not found, skipping: " + p.getFileName());
                     }
                 }
 
                 if (filesToCompact.size() < 2) {
-                    log.fine("Недостаточно файлов для сжатия, пропуск.");
+                    log.fine("Not enough files for compaction, skipping.");
                     return;
                 }
 
                 Compactor compactor = new Compactor();
                 SstFile merged = compactor.submit(filesToCompact, storageDir);
                 if (merged == null) {
-                    log.warning("Результат сжатия пуст, пропуск.");
+                    log.warning("Compaction result is empty, skipping.");
                     return;
                 }
 
                 applyCompaction(filesToCompact, merged);
-                log.info("Сжатие завершено. Создан новый файл: " + merged.getPath().getFileName());
+                log.info("Compaction completed. New file created: " + merged.getPath().getFileName());
 
             } catch (Exception e) {
-                log.log(Level.SEVERE, "Сбой при выполнении сжатия", e);
+                log.log(Level.SEVERE, "Compaction failure", e);
             }
         });
     }
@@ -390,9 +390,9 @@ public class LsmStorage {
                     try {
                         old.close();
                         Files.deleteIfExists(old.getPath());
-                        log.fine("Удален старый файл: " + old.getPath().getFileName());
+                        log.fine("Deleted old file: " + old.getPath().getFileName());
                     } catch (Exception e) {
-                        log.log(Level.WARNING, "Не удалось удалить файл " + old.getPath().getFileName(), e);
+                        log.log(Level.WARNING, "Failed to delete file " + old.getPath().getFileName(), e);
                     }
                 }
                 break;

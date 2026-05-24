@@ -23,16 +23,13 @@ public class Compactor {
      * @return Открытый объект нового сжатого SstFile, или null если после очистки данных не осталось.
      */
     public SstFile submit(List<SstFile> list, Path storageDir) throws IOException {
-        // Слияние: более новые файлы перезаписывают более старые (putAll в порядке от старых к новым)
+
         Map<String, String> merged = new TreeMap<>();
 
         for (SstFile file : list) {
             merged.putAll(SstReader.read(file.getPath()));
         }
 
-        // Вычищаем tombstone-записи: поскольку мы сжимаем самые старые файлы,
-        // маркеры удаления больше не нужны — нижележащих данных, которые они
-        // скрывают, уже не существует.
         merged.entrySet().removeIf(entry -> LsmStorage.isTombstone(entry.getValue()));
 
         if (merged.isEmpty()) {

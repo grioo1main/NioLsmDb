@@ -42,14 +42,14 @@ public class NioHttpServer {
         NioHttpServer server = new NioHttpServer();
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            log.info("Остановка сервера и безопасное закрытие хранилища...");
+            log.info("Stopping server and gracefully closing storage...");
             server.storage.close();
         }));
 
         try {
             server.start();
         } catch (IOException e) {
-            log.log(Level.SEVERE, "Критическая ошибка сервера", e);
+            log.log(Level.SEVERE, "Critical server error", e);
         }
     }
 
@@ -60,7 +60,7 @@ public class NioHttpServer {
         serverChannel.configureBlocking(false);
         serverChannel.register(selector, SelectionKey.OP_ACCEPT);
 
-        log.info("NIO HTTP Сервер успешно запущен на порту " + PORT);
+        log.info("NIO HTTP Server successfully started on port " + PORT);
 
         while (true) {
             selector.select(1000);
@@ -85,7 +85,7 @@ public class NioHttpServer {
             else if (key.isReadable()) read(key);
             else if (key.isWritable()) write(key);
         } catch (IOException e) {
-            log.warning("Разрыв соединения с клиентом: " + e.getMessage());
+            log.warning("Client connection lost: " + e.getMessage());
             closeQuietly(key);
         }
     }
@@ -96,7 +96,7 @@ public class NioHttpServer {
         for (SelectionKey key : selector.keys()) {
             if (key.isValid() && key.attachment() instanceof ConnectionContext ctx) {
                 if (now - ctx.lastActivityTime > CONNECTION_TIMEOUT_MS) {
-                    log.info("Таймаут соединения. Отключение клиента: " + getRemoteAddressQuietly((SocketChannel) key.channel()));
+                    log.info("Connection timeout. Disconnecting client: " + getRemoteAddressQuietly((SocketChannel) key.channel()));
                     closeQuietly(key);
                 }
             }
@@ -109,7 +109,7 @@ public class NioHttpServer {
         if (client != null) {
             client.configureBlocking(false);
             client.register(selector, SelectionKey.OP_READ, new ConnectionContext());
-            log.fine("Новое подключение: " + client.getRemoteAddress());
+            log.fine("New connection: " + client.getRemoteAddress());
         }
     }
 
@@ -183,7 +183,7 @@ public class NioHttpServer {
     }
 
     private void processRequest(ConnectionContext ctx, SelectionKey key) {
-        log.info("Обработка запроса: " + ctx.method + " " + ctx.path);
+        log.info("Processing request: " + ctx.method + " " + ctx.path);
         try {
             if ("GET".equals(ctx.method) && ctx.path.startsWith("/get")) {
                 handleGet(ctx);
@@ -198,7 +198,7 @@ public class NioHttpServer {
             key.interestOps(SelectionKey.OP_WRITE);
             ctx.state = RequestStatus.WRITE_RESPONSE;
         } catch (Exception e) {
-            log.log(Level.SEVERE, "Внутренняя ошибка при обработке запроса", e);
+            log.log(Level.SEVERE, "Internal error processing request", e);
             sendError(ctx, key, 500, "Internal Server Error");
         }
     }
@@ -285,7 +285,7 @@ public class NioHttpServer {
 
         if (!ctx.responseBuffer.hasRemaining()) {
             if (ctx.closeAfterResponse) {
-                log.fine("Закрытие соединения после отправки ошибочного ответа.");
+                log.fine("Closing connection after sending error response.");
                 closeQuietly(key);
             } else {
                 ctx.reset();
