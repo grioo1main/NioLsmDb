@@ -21,10 +21,25 @@ dependencies {
     annotationProcessor 'org.openjdk.jmh:jmh-generator-annprocess:1.37'
 }
 
-test {
-    useJUnitPlatform()
-     systemProperty "file.encoding", "UTF-8"
-    systemProperty "java.util.logging.ConsoleHandler.encoding", "UTF-8"
+// 1. Форсируем UTF-8 при компиляции (чтобы русские комменты и строки не бились)
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
 }
-compileJava.options.encoding = 'UTF-8'
+
+// 2. Форсируем UTF-8 для тестов
+tasks.withType(Test).configureEach {
+    useJUnitPlatform()
+    systemProperty 'file.encoding', 'UTF-8'
+    systemProperty 'sun.stdout.encoding', 'UTF-8'
+    systemProperty 'sun.stderr.encoding', 'UTF-8'
+}
+
+// 3. Форсируем UTF-8 для запуска сервера через "gradle run"
+tasks.named('run') {
+    // Указываем JVM, что мы работаем в UTF-8
+    systemProperty 'file.encoding', 'UTF-8'
+    // Эти две строчки критически важны для вывода в консоль Windows на Java 18-21
+    systemProperty 'sun.stdout.encoding', 'UTF-8'
+    systemProperty 'sun.stderr.encoding', 'UTF-8'
+}
 

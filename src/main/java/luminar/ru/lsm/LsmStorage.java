@@ -18,14 +18,22 @@ import java.util.stream.Stream;
 
 /**
  * Основной движок LSM-хранилища (Log-Structured Merge-Tree).
- * Обеспечивает потокобезопасные операции записи и чтения.
- * Данные сначала пишутся в WAL и MemTable. При достижении порога,
- * MemTable асинхронно сбрасывается на диск (Flush) в виде SSTable.
- * Поддерживает фоновое сжатие (Compaction) старых файлов.
+ * Обеспечивает потокобезопасные операции записи, чтения и удаления.
+ *
+ * Удаление реализовано через маркер-удаления (tombstone):
+ * вместо физического удаления записи в MemTable и WAL сохраняется
+ * специальное значение TOMBSTONE. При чтении наличие tombstone
+ * означает отсутствие ключа. Compaction вычищает tombstone-записи.
  */
 public class LsmStorage {
 
     private static final Logger log = Logger.getLogger(LsmStorage.class.getName());
+
+    /**
+     * Маркер удаления (tombstone). Хранится как значение для удалённых ключей.
+     * При чтении наличие этого маркера трактуется как «ключ отсутствует».
+     */
+    public static final String TOMBSTONE = "\u0000TOMBSTONE\u0000";
 
     private static final int COMPACTION_THRESHOLD = 4;
     private static final int COMPACTION_BATCH_SIZE = 3;
@@ -35,7 +43,7 @@ public class LsmStorage {
     private final AtomicReference<ConcurrentSkipListMap<String, String>> memTable = new AtomicReference<>(new ConcurrentSkipListMap<>());
     private final AtomicReference<ConcurrentSkipListMap<String, String>> immutableMemTable = new AtomicReference<>(null);
     private final AtomicReference<List<SstFile>> sstFiles = new AtomicReference<>(new ArrayList<>());
-    
+
     private final AtomicInteger memTableSize = new AtomicInteger(0);
     private final AtomicBoolean isClosed = new AtomicBoolean(false);
     private final AtomicLong fileCounter = new AtomicLong(0);
@@ -48,16 +56,6 @@ public class LsmStorage {
 
     private WalWriter walWriter;
     private final ReentrantReadWriteLock closeLock = new ReentrantReadWriteLock();
-    // Может использоваться для декодирования логов в консоли, если кодировка по умолчанию не поддерживает русский язык  
-    // static {
-    //     try {
-    //         for (java.util.logging.Handler handler : Logger.getLogger("").getHandlers()) {
-    //             if (handler instanceof java.util.logging.ConsoleHandler) {
-    //                 handler.setEncoding("cp866");
-    //             }
-    //         }
-    //     } catch (Exception ignored) {}
-    // }
 
     public LsmStorage(Path storageDir, int threshold) {
         this.storageDir = storageDir;
@@ -68,7 +66,7 @@ public class LsmStorage {
             t.setDaemon(true);
             return t;
         });
-        
+
         this.compactExecutor = Executors.newSingleThreadExecutor(r -> {
             Thread t = new Thread(r, "lsm-compact-thread");
             t.setDaemon(true);
@@ -138,7 +136,25 @@ public class LsmStorage {
         if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
         Objects.requireNonNull(key, "Ключ не может быть null");
         Objects.requireNonNull(value, "Значение не может быть null");
+        if (TOMBSTONE.equals(value)) throw new IllegalArgumentException("Значение совпадает с внутренним маркером удаления");
 
+        writeToWalAndMemTable(key, value);
+    }
+
+    /**
+     * Удаляет ключ из хранилища посредством записи маркера-удаления (tombstone).
+     * Физическое удаление происходит при следующем compaction.
+     *
+     * Вызов delete на несуществующем ключе безопасен и не является ошибкой.
+     */
+    public void delete(String key) {
+        if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
+        Objects.requireNonNull(key, "Ключ не может быть null");
+
+        writeToWalAndMemTable(key, TOMBSTONE);
+    }
+
+    private void writeToWalAndMemTable(String key, String value) {
         try {
             walWriter.append(key, value);
         } catch (IOException e) {
@@ -157,32 +173,41 @@ public class LsmStorage {
 
     /**
      * Ищет значение по ключу согласно иерархии LSM-дерева:
-     * 1. Аккутальная MemTable
+     * 1. Актуальная MemTable
      * 2. Immutable MemTable (в процессе сброса)
      * 3. SSTables (от новых к старым)
+     *
+     * Если найден tombstone — возвращает null (ключ удалён).
      */
     public String get(String key) {
         if (isClosed.get()) throw new IllegalStateException("Хранилище закрыто");
         Objects.requireNonNull(key);
 
         String val = memTable.get().get(key);
-        if (val != null) return val;
+        if (val != null) return isTombstone(val) ? null : val;
 
         ConcurrentSkipListMap<String, String> imm = immutableMemTable.get();
         if (imm != null) {
             val = imm.get(key);
-            if (val != null) return val;
+            if (val != null) return isTombstone(val) ? null : val;
         }
 
         for (SstFile sst : sstFiles.get()) {
             try {
                 val = sst.get(key);
-                if (val != null) return val;
+                if (val != null) return isTombstone(val) ? null : val;
             } catch (IOException e) {
                 log.log(Level.WARNING, "Ошибка чтения из SSTable " + sst.getPath(), e);
             }
         }
         return null;
+    }
+
+    /**
+     * Проверяет, является ли значение маркером удаления.
+     */
+    public static boolean isTombstone(String value) {
+        return TOMBSTONE.equals(value);
     }
 
     /**

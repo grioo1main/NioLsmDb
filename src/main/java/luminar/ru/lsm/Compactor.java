@@ -8,29 +8,41 @@ import java.util.TreeMap;
 
 /**
  * Отвечает за процесс слияния (Compaction) нескольких файлов SSTable в один.
- * Устраняет дубликаты и устаревшие значения.
+ * Устраняет дубликаты, устаревшие значения и маркеры удаления (tombstones).
+ *
+ * Tombstone-записи вычищаются при слиянии самых старых файлов,
+ * т.к. на этом уровне нет более старых данных, которые они могли бы скрывать.
  */
 public class Compactor {
 
     /**
      * Сливает список старых SSTable в один новый файл.
-     * 
-     * @param list Список файлов (ОБЯЗАТЕЛЬНО отсортированный от старого к новому).
+     *
+     * @param list       Список файлов (ОБЯЗАТЕЛЬНО отсортированный от старого к новому).
      * @param storageDir Директория для сохранения нового файла.
-     * @return Открытый объект нового сжатого SstFile.
+     * @return Открытый объект нового сжатого SstFile, или null если после очистки данных не осталось.
      */
     public SstFile submit(List<SstFile> list, Path storageDir) throws IOException {
-        
-        Map<String, String> map = new TreeMap<>();
+        // Слияние: более новые файлы перезаписывают более старые (putAll в порядке от старых к новым)
+        Map<String, String> merged = new TreeMap<>();
 
         for (SstFile file : list) {
-            map.putAll(SstReader.read(file.getPath()));
+            merged.putAll(SstReader.read(file.getPath()));
+        }
+
+        // Вычищаем tombstone-записи: поскольку мы сжимаем самые старые файлы,
+        // маркеры удаления больше не нужны — нижележащих данных, которые они
+        // скрывают, уже не существует.
+        merged.entrySet().removeIf(entry -> LsmStorage.isTombstone(entry.getValue()));
+
+        if (merged.isEmpty()) {
+            return null;
         }
 
         String fileName = String.format("sstable_compact_%d.db", System.currentTimeMillis());
-        Path path = storageDir.resolve(fileName); 
+        Path path = storageDir.resolve(fileName);
 
-        SstWriter.write(path, map);
+        SstWriter.write(path, merged);
         return SstFile.open(path);
     }
 }

@@ -19,13 +19,10 @@ import java.util.logging.Logger;
 /**
  * Неблокирующий HTTP-сервер на базе Java NIO (Single-Threaded Event Loop).
  * <p>
- * Сервер использует конечный автомат (State Machine) для асинхронной обработки
- * входящих соединений без блокировки потока. Поддерживает протокол HTTP/1.1
- * и механизм Keep-Alive. Интегрирован с LSM-деревом для хранения пар "ключ-значение".
- * <p>
  * Поддерживаемые эндпоинты:
- * - GET /get?key={key}
- * - POST /set (Body: key={key}&value={value})
+ * - GET    /get?key={key}
+ * - POST   /set (Body: key={key}&value={value})
+ * - DELETE /delete?key={key}
  */
 public class NioHttpServer {
 
@@ -38,13 +35,9 @@ public class NioHttpServer {
     private final LsmStorage storage;
 
     public NioHttpServer() {
-        this.storage = new LsmStorage(Path.of("data"), 10000);
+        this.storage = new LsmStorage(Path.of("data"), 1000);
     }
 
-    /**
-     * Точка входа приложения.
-     * Инициализирует сервер и регистрирует Shutdown Hook для безопасного закрытия ресурсов (Graceful Shutdown).
-     */
     public static void main(String[] args) {
         NioHttpServer server = new NioHttpServer();
 
@@ -60,10 +53,6 @@ public class NioHttpServer {
         }
     }
 
-    /**
-     * Запуск главного цикла событий (Event Loop).
-     * Мультиплексирует операции ввода-вывода (I/O) и управляет жизненным циклом соединений.
-     */
     public void start() throws IOException {
         Selector selector = Selector.open();
         ServerSocketChannel serverChannel = ServerSocketChannel.open();
@@ -89,10 +78,6 @@ public class NioHttpServer {
         }
     }
 
-    /**
-     * Маршрутизатор событий NIO селектора.
-     * Определяет тип доступной операции (чтение/запись/подключение) и передает управление соответствующему обработчику.
-     */
     private void processKey(SelectionKey key, Selector selector) {
         try {
             if (!key.isValid()) return;
@@ -105,10 +90,6 @@ public class NioHttpServer {
         }
     }
 
-    /**
-     * Механизм защиты от зависших соединений (например, атак Slowloris).
-     * Закрывает соединения, от которых не поступало активности дольше заданного таймаута.
-     */
     private void checkTimeouts(Selector selector) {
         long now = System.currentTimeMillis();
 
@@ -201,9 +182,6 @@ public class NioHttpServer {
         }
     }
 
-    /**
-     * Бизнес-логика обработки полностью прочитанного HTTP-запроса.
-     */
     private void processRequest(ConnectionContext ctx, SelectionKey key) {
         log.info("Обработка запроса: " + ctx.method + " " + ctx.path);
         try {
@@ -211,6 +189,8 @@ public class NioHttpServer {
                 handleGet(ctx);
             } else if (("POST".equals(ctx.method) || "PUT".equals(ctx.method)) && ctx.path.startsWith("/set")) {
                 handleSet(ctx);
+            } else if ("DELETE".equals(ctx.method) && ctx.path.startsWith("/delete")) {
+                handleDelete(ctx);
             } else {
                 sendError(ctx, key, 404, "Not Found");
                 return;
@@ -259,6 +239,25 @@ public class NioHttpServer {
         } else {
             sendError(ctx, null, 400, "Invalid format. Use key=...&value=...");
         }
+    }
+
+    /**
+     * Удаляет ключ из хранилища.
+     * Записывает tombstone через LsmStorage.delete().
+     * Возвращает 200 даже если ключ не существовал (идемпотентное поведение DELETE).
+     */
+    private void handleDelete(ConnectionContext ctx) {
+        String query = ctx.path.contains("?") ? ctx.path.substring(ctx.path.indexOf("?") + 1) : "";
+        Map<String, String> params = parseFormParameters(query);
+        String key = params.get("key");
+
+        if (key == null || key.isBlank()) {
+            sendError(ctx, null, 400, "Missing 'key' parameter");
+            return;
+        }
+
+        storage.delete(key);
+        buildResponse(ctx, 200, "OK", "Deleted");
     }
 
     private Map<String, String> parseFormParameters(String queryOrBody) {
@@ -319,9 +318,6 @@ public class NioHttpServer {
         }
     }
 
-    /**
-     * Формирует байтовый буфер ответа с учетом флага жизненного цикла соединения (Keep-Alive / Close).
-     */
     private void buildResponse(ConnectionContext ctx, int code, String status, String body) {
         byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
         String connectionPolicy = ctx.closeAfterResponse ? "close" : "keep-alive";
@@ -340,12 +336,9 @@ public class NioHttpServer {
         ctx.responseBuffer = resp;
     }
 
-    /**
-     * Формирует ответ с ошибкой, гарантируя закрытие сокета после успешной отправки ответа.
-     */
     private void sendError(ConnectionContext ctx, SelectionKey key, int code, String message) {
-        ctx.closeAfterResponse = true; // Сначала ставим флаг
-        buildResponse(ctx, code, message, message); // Теперь buildResponse увидит флаг и поставит Connection: close
+        ctx.closeAfterResponse = true;
+        buildResponse(ctx, code, message, message);
 
         ctx.state = RequestStatus.WRITE_RESPONSE;
         if (key != null) {
@@ -384,9 +377,6 @@ public class NioHttpServer {
 
     enum RequestStatus {READ_HEADERS, READ_BODY, WRITE_RESPONSE}
 
-    /**
-     * Хранилище состояния (Context) для каждого активного соединения.
-     */
     static class ConnectionContext {
         ByteBuffer readBuffer = ByteBuffer.allocate(BUFFER_SIZE);
         ByteBuffer responseBuffer;
@@ -404,9 +394,6 @@ public class NioHttpServer {
             this.lastActivityTime = System.currentTimeMillis();
         }
 
-        /**
-         * Сбрасывает состояние контекста для принятия следующего запроса в том же соединении (Keep-Alive).
-         */
         void reset() {
             readBuffer.clear();
             responseBuffer = null;
